@@ -1,0 +1,27 @@
+{
+  "name": "minhas-financas",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "build": "nuxt build",
+    "dev": "nuxt dev",
+    "generate": "nuxt generate",
+    "preview": "nuxt preview",
+    "postinstall": "nuxt prepare"
+  },
+  "dependencies": {
+    "@heroicons/vue": "^2.2.0",
+    "@nuxtjs/supabase": "^2.0.0",
+    "@nuxtjs/tailwindcss": "^6.14.0",
+    "@pinia/nuxt": "^0.11.2",
+    "nuxt": "^4.1.2",
+    "pinia": "^3.0.3",
+    "vue": "^3.5.22",
+    "vue-router": "^4.5.1",
+    "vue-toastification": "^2.0.0-rc.5"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "@vite-pwa/nuxt": "^1.1.1"
+  }
+}
