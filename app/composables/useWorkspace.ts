@@ -38,7 +38,7 @@ export function useWorkspace() {
           {
             id: 'm-1',
             grupo_id: 'grupo-demo-casal',
-            user_id: user.value?.id || 'user-demo-1',
+            user_id: 'user-demo-1',
             papel: 'admin',
             perfil: { id: 'user-demo-1', nome: 'Você', email: 'voce@email.com', moeda: 'BRL' }
           },
@@ -267,6 +267,73 @@ export function useWorkspace() {
     })
   }
 
+  // ──────────────────────────────────────────
+  // VINCULAR PARCEIRO (RPC VINCULAR_PARCEIRO)
+  // ──────────────────────────────────────────
+  const adicionarParceiro = async (email: string): Promise<{ sucesso: boolean; mensagem: string }> => {
+    if (!grupoAtivo.value?.id) {
+      return { sucesso: false, mensagem: 'Nenhum workspace de casal ativo encontrado.' }
+    }
+
+    const emailLimpo = email ? email.trim().toLowerCase() : ''
+    if (!emailLimpo || !emailLimpo.includes('@')) {
+      return { sucesso: false, mensagem: 'Informe um endereço de e-mail válido.' }
+    }
+
+    // Modo Convidado / Demo local
+    if (!user.value) {
+      const novomembro: MembroGrupo = {
+        id: `m-${Date.now()}`,
+        grupo_id: grupoAtivo.value.id,
+        user_id: `user-demo-${membrosGrupo.value.length + 1}`,
+        papel: 'membro',
+        perfil: {
+          id: `user-demo-${membrosGrupo.value.length + 1}`,
+          nome: emailLimpo.split('@')[0] || 'Parceiro(a)',
+          email: emailLimpo,
+          moeda: 'BRL'
+        }
+      }
+      membrosGrupo.value.push(novomembro)
+      return { sucesso: true, mensagem: `Parceiro(a) ${emailLimpo} vinculado(a) com sucesso ao seu grupo!` }
+    }
+
+    try {
+      const { data, error } = await db.rpc('vincular_parceiro', {
+        email_convidado: emailLimpo,
+        p_grupo_id: grupoAtivo.value.id
+      })
+
+      if (error) {
+        return { sucesso: false, mensagem: error.message || 'Não foi possível vincular a conta.' }
+      }
+
+      await carregarWorkspace()
+      return {
+        sucesso: true,
+        mensagem: data?.mensagem || 'Parceiro(a) vinculado(a) com sucesso ao seu workspace!'
+      }
+    } catch (err: any) {
+      return { sucesso: false, mensagem: err?.message || 'Erro inesperado ao vincular parceiro.' }
+    }
+  }
+
+  // ──────────────────────────────────────────
+  // ATUALIZAR NOME DO WORKSPACE
+  // ──────────────────────────────────────────
+  const atualizarNomeGrupo = async (novoNome: string) => {
+    if (!grupoAtivo.value || !novoNome.trim()) return
+    grupoAtivo.value.nome = novoNome.trim()
+
+    if (user.value && grupoAtivo.value.id && !grupoAtivo.value.id.startsWith('grupo-demo-')) {
+      try {
+        await db.from('grupos_familiares').update({ nome: novoNome.trim() }).eq('id', grupoAtivo.value.id)
+      } catch (e) {
+        console.error('Erro ao atualizar nome do grupo:', e)
+      }
+    }
+  }
+
   return {
     grupoAtivo,
     gruposDisponiveis,
@@ -279,6 +346,8 @@ export function useWorkspace() {
     alternarModoVisao,
     criarRateio5050,
     calcularAcertoDeContas,
-    liquidarAcertoDeContas
+    liquidarAcertoDeContas,
+    adicionarParceiro,
+    atualizarNomeGrupo
   }
 }

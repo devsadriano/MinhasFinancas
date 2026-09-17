@@ -103,7 +103,8 @@ import {
   ChartPieIcon,
   ArrowPathIcon,
   ChartBarIcon,
-  SparklesIcon
+  SparklesIcon,
+  Cog6ToothIcon
 } from '@heroicons/vue/24/outline'
 
 const route = useRoute()
@@ -130,6 +131,7 @@ const menuItems = [
   { label: 'Relatórios', path: '/relatorios', icon: ChartBarIcon },
   { label: 'Categorias', path: '/categorias', icon: TagIcon },
   { label: 'Contas & Bancos', path: '/contas', icon: BuildingLibraryIcon },
+  { label: 'Configurações', path: '/configuracoes', icon: Cog6ToothIcon },
 ]
 
 defineExpose({ mobileOpen })

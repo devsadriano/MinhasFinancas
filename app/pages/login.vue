@@ -135,7 +135,7 @@ const handleSubmit = async () => {
       if (error) throw error
       navigateTo('/')
     } else {
-      const { error } = await supabase.auth.signUp({
+      const { data, error } = await supabase.auth.signUp({
         email: email.value,
         password: senha.value,
         options: {
@@ -146,10 +146,26 @@ const handleSubmit = async () => {
       })
 
       if (error) throw error
-      mensagemSucesso.value = 'Conta criada com sucesso! Você já pode navegar no sistema.'
-      setTimeout(() => {
-        navigateTo('/')
-      }, 1000)
+
+      mensagemSucesso.value = 'Conta criada com sucesso! Redirecionando para o sistema...'
+
+      // Se o Supabase retornou sessão, navega direto. Caso contrário, faz login em seguida.
+      if (data?.session) {
+        await navigateTo('/')
+      } else {
+        const { error: loginErr } = await supabase.auth.signInWithPassword({
+          email: email.value,
+          password: senha.value
+        })
+        if (!loginErr) {
+          await navigateTo('/')
+        } else {
+          // Se precisar de confirmação por e-mail ou se auto-login falhar
+          setTimeout(() => {
+            navigateTo('/')
+          }, 1200)
+        }
+      }
     }
   } catch (err) {
     mensagemErro.value = err.message || 'Erro ao processar solicitação'

@@ -133,7 +133,12 @@
                   {{ item.tipo === 'receita' ? 'ENT' : 'SAÍ' }}
                 </div>
                 <div class="min-w-0">
-                  <p class="text-sm font-semibold text-white truncate">{{ item.descricao }}</p>
+                  <div class="flex items-center gap-2">
+                    <p class="text-sm font-semibold text-white truncate">{{ item.descricao }}</p>
+                    <span v-if="isItemShared(item)" class="text-[10px] bg-purple-500/15 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded-full font-mono font-bold whitespace-nowrap shrink-0">
+                      🤝 50/50
+                    </span>
+                  </div>
                   <p class="text-[11px] text-gray-400 font-mono">{{ item.categoria }} · {{ formatData(item.data) }}</p>
                 </div>
               </div>
@@ -191,7 +196,12 @@
                         {{ item.tipo === 'receita' ? 'ENT' : 'SAÍ' }}
                       </div>
                       <div>
-                        <p class="text-sm font-semibold text-white">{{ item.descricao }}</p>
+                        <div class="flex items-center gap-2">
+                          <p class="text-sm font-semibold text-white">{{ item.descricao }}</p>
+                          <span v-if="isItemShared(item)" class="text-[10px] bg-purple-500/15 text-purple-300 border border-purple-500/30 px-2 py-0.5 rounded-full font-mono font-bold whitespace-nowrap">
+                            🤝 50/50
+                          </span>
+                        </div>
                         <span class="text-[11px] text-gray-400 font-mono">
                           {{ item.tipo === 'receita' ? 'Entrada' : 'Saída' }}
                           {{ item.total_parcelas > 1 ? ` · Parc ${item.parcela_atual}/${item.total_parcelas}` : '' }}
@@ -353,6 +363,13 @@ const limparFiltros = () => {
   filtroTipo.value = 'todos'
   filtroCategoria.value = 'todas'
   filtroConta.value = 'todas'
+}
+
+const isItemShared = (item) => {
+  if (item.dividir5050) return true
+  if (item.rateios && item.rateios.length > 0) return true
+  if (item.tipo === 'despesa' && ['Alimentação', 'Moradia', 'Pets', 'Saúde'].includes(item.categoria)) return true
+  return false
 }
 
 const formatData = (str) => {

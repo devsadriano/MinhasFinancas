@@ -372,6 +372,11 @@ const setMes = (mes, ano) => {
   anoSelecionado.value = ano
 }
 
+import { useWorkspace } from '~/composables/useWorkspace'
+
+const { modoVisao } = useWorkspace()
+const user = useSupabaseUser()
+
 const {
   transacoes,
   bancos,
@@ -386,11 +391,28 @@ const {
 onMounted(() => carregarTudo())
 
 const transacoesDoPeriodo = computed(() => {
-  return transacoes.value.filter(t => {
+  const filtradas = transacoes.value.filter(t => {
     if (!t.data) return false
     const [ano, mes] = t.data.split('-').map(Number)
     return mes === mesSelecionado.value && ano === anoSelecionado.value
   })
+
+  if (modoVisao.value === 'pessoal') {
+    const currentUserId = user.value?.id
+    return filtradas.map(t => {
+      if (t.rateios && t.rateios.length > 0) {
+        const meuRateio = t.rateios.find(r => r.user_id === currentUserId)
+        const valorCalculado = meuRateio ? Number(meuRateio.valor) : Number(t.valor) / 2
+        return { ...t, valor: valorCalculado }
+      }
+      if (t.tipo === 'despesa' && (t.dividir5050 || ['Alimentação', 'Moradia', 'Pets'].includes(t.categoria))) {
+        return { ...t, valor: Number(t.valor) / 2 }
+      }
+      return t
+    })
+  }
+
+  return filtradas
 })
 
 const totalReceitas = computed(() =>
