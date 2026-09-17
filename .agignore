@@ -1,0 +1,19 @@
+# Antigravity IDE - Cache exclusions
+
+# Node.js dependencies (very large, not needed for indexing)
+node_modules/
+
+# Nuxt build outputs
+.nuxt/
+.output/
+.nitro/
+.cache/
+.data/
+
+# Logs
+logs/
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

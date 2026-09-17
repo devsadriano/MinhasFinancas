@@ -95,7 +95,7 @@
   </div>
 </template>
 
-<script setup>
+<script setup lang="ts">
 import { ref } from 'vue'
 
 definePageMeta({
@@ -167,8 +167,16 @@ const handleSubmit = async () => {
         }
       }
     }
-  } catch (err) {
-    mensagemErro.value = err.message || 'Erro ao processar solicitação'
+  } catch (err: any) {
+    let msg = err?.message || 'Erro ao processar solicitação'
+    if (msg.toLowerCase().includes('rate limit')) {
+      msg = 'Muitas tentativas seguidas de criação de conta/e-mail. No Supabase, desative a opção "Confirm email" em Authentication -> Providers -> Email para liberar criar contas instantaneamente sem limite.'
+    } else if (msg.toLowerCase().includes('already registered')) {
+      msg = 'Este e-mail já está cadastrado. Alterne para a aba "Entrar".'
+    } else if (msg.toLowerCase().includes('invalid login credentials')) {
+      msg = 'E-mail ou senha incorretos. Verifique os dados e tente novamente.'
+    }
+    mensagemErro.value = msg
   } finally {
     carregando.value = false
   }

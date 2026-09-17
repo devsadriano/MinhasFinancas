@@ -36,7 +36,7 @@
             id="file-input-statement"
             ref="fileInputRef" 
             type="file" 
-            accept=".ofx,.csv,.txt" 
+            accept=".pdf,.ofx,.csv,.txt,.md,.markdown" 
             class="hidden" 
             @change="handleFileSelect"
           />
@@ -48,8 +48,8 @@
           </div>
 
           <div>
-            <p class="text-sm font-bold text-white">Clique aqui para selecionar seu arquivo .OFX ou .CSV</p>
-            <p class="text-xs text-gray-400 mt-1">Suporta extratos do Nubank, Itaú, Inter, Bradesco, C6, Santander, Caixa, etc.</p>
+            <p class="text-sm font-bold text-white">Clique aqui para selecionar seu arquivo .PDF, .OFX, .CSV, .TXT ou .MD</p>
+            <p class="text-xs text-gray-400 mt-1">Suporta faturas PDF e extratos do Nubank, Itaú, Inter, Bradesco, C6, Santander, PicPay, Mercado Pago, etc.</p>
           </div>
 
           <span class="bg-brand/15 border border-brand/30 text-brand text-xs font-semibold px-4 py-2 rounded-lg transition-colors group-hover:bg-brand/25 pointer-events-none">
@@ -62,14 +62,21 @@
         </div>
 
         <div class="flex items-center gap-6 text-xs text-gray-400 font-mono pt-2">
+          <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-red-400"></span>Fatura PDF</span>
           <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-brand"></span>OFX Bancário</span>
           <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-blue-400"></span>CSV / Excel</span>
-          <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-purple-400"></span>Leitor de Parcelas</span>
+          <span class="flex items-center gap-1.5"><span class="w-2 h-2 rounded-full bg-purple-400"></span>Texto / Markdown</span>
         </div>
       </div>
 
       <!-- Step 2: Preview & Auto-Categorization Table -->
       <div v-else class="flex-1 flex flex-col min-h-0">
+        <!-- Banner de erro (se houver na etapa 2) -->
+        <div v-if="erroLeitura" class="mx-4 mt-3 p-3.5 rounded-xl bg-expense/15 border border-expense/30 text-expense text-xs font-semibold flex items-center justify-between shadow-lg">
+          <span>⚠️ {{ erroLeitura }}</span>
+          <button @click="erroLeitura = ''" class="text-expense font-bold">✕</button>
+        </div>
+
         <!-- Banner de Auto-Detecção de Instituição -->
         <div v-if="instituicaoDetectada" class="px-5 py-2.5 bg-gradient-to-r from-purple-900/40 via-purple-800/20 to-dark-850 border-b border-purple-500/30 flex items-center justify-between text-xs">
           <div class="flex items-center gap-2">
@@ -120,7 +127,7 @@
                 v-model="cartaoAlvoId" 
                 class="bg-dark-900 border border-purple-500/40 text-white rounded-lg px-3 py-1.5 text-xs focus:outline-none focus:border-purple-400 font-semibold"
               >
-                <option v-for="card in cartoes" :key="card.id" :value="card.id">
+                <option v-for="card in cartoes" :key="card.id || card.nome" :value="card.id || card.nome">
                   {{ card.nome }}
                 </option>
               </select>
@@ -314,7 +321,7 @@
 
 <script setup>
 import { ref, computed, watch, onMounted } from 'vue'
-import { parseStatementFile, detectInstitution } from '~/utils/statementParser'
+import { parseStatementFile, detectInstitution, extractTextFromPDF } from '~/utils/statementParser'
 import { useFinancas } from '~/composables/useFinancas'
 
 const props = defineProps({
@@ -324,7 +331,7 @@ const props = defineProps({
 
 const emit = defineEmits(['fechar', 'importar'])
 
-const { bancos, cartoes, categorias, carregarTudo, obterOuCriarCartao, obterOuCriarConta } = useFinancas()
+const { bancos, cartoes, categorias, carregarTudo, obterOuCriarCartao, obterOuCriarConta, adicionarLancamentosEmLote } = useFinancas()
 
 const fileInputRef = ref(null)
 const dragOver = ref(false)
@@ -342,7 +349,7 @@ onMounted(async () => {
     contaAlvo.value = bancos.value[0].nome
   }
   if (cartoes.value.length > 0) {
-    cartaoAlvoId.value = cartoes.value[0].id || ''
+    cartaoAlvoId.value = cartoes.value[0].id || cartoes.value[0].nome || ''
   }
 })
 
@@ -358,7 +365,7 @@ watch(() => props.aberto, async (novo) => {
     if (props.cartaoPreSelecionadoId) {
       cartaoAlvoId.value = props.cartaoPreSelecionadoId
     } else if (cartoes.value.length > 0) {
-      cartaoAlvoId.value = cartoes.value[0].id || ''
+      cartaoAlvoId.value = cartoes.value[0].id || cartoes.value[0].nome || ''
     }
   }
 })
@@ -382,10 +389,16 @@ const processContent = async (content, fileName) => {
         const cardObj = await obterOuCriarCartao({
           nome: detected.nome,
           bandeira: detected.bandeira,
-          cor: detected.cor
+          cor: detected.cor,
+          dia_fechamento: detected.dia_fechamento,
+          dia_vencimento: detected.dia_vencimento,
+          limite: detected.limite
         })
-        if (cardObj && cardObj.id) {
-          cartaoAlvoId.value = cardObj.id
+        if (cardObj) {
+          // Preferência ao UUID real do Supabase para garantir o vínculo no banco
+          cartaoAlvoId.value = cardObj.id && !String(cardObj.id).startsWith('card-')
+            ? String(cardObj.id)
+            : (cardObj.nome || '')
         }
       } else {
         modoDestino.value = 'conta'
@@ -408,20 +421,45 @@ const readFile = (file) => {
   if (!file) return
   erroLeitura.value = ''
 
+  if (file.name.toLowerCase().endsWith('.pdf')) {
+    salvando.value = true
+    const readerArray = new FileReader()
+    readerArray.onload = async (evt) => {
+      try {
+        const buffer = evt.target?.result
+        if (buffer) {
+          const textPdf = await extractTextFromPDF(buffer)
+          const ok = await processContent(textPdf, file.name)
+          if (!ok) {
+            erroLeitura.value = `Não conseguimos reconhecer lançamentos válidos na fatura PDF "${file.name}".`
+          }
+        }
+      } catch (err) {
+        console.error('Erro ao ler PDF:', err)
+        erroLeitura.value = `Ocorreu um erro ao processar o arquivo PDF "${file.name}".`
+      } finally {
+        salvando.value = false
+        if (fileInputRef.value) fileInputRef.value.value = ''
+      }
+    }
+    readerArray.readAsArrayBuffer(file)
+    return
+  }
+
   const readerUtf8 = new FileReader()
-  readerUtf8.onload = (evt) => {
+  readerUtf8.onload = async (evt) => {
     const contentUtf8 = (evt.target?.result || '').toString()
-    const ok = processContent(contentUtf8, file.name)
+    const ok = await processContent(contentUtf8, file.name)
 
     // Se UTF-8 não decodificou nenhuma transação válida, tenta ISO-8859-1 (comum em bancos BR)
     if (!ok) {
       const readerIso = new FileReader()
-      readerIso.onload = (evtIso) => {
+      readerIso.onload = async (evtIso) => {
         const contentIso = (evtIso.target?.result || '').toString()
-        const okIso = processContent(contentIso, file.name)
+        const okIso = await processContent(contentIso, file.name)
 
         if (!okIso) {
-          erroLeitura.value = `Não conseguimos reconhecer lançamentos no arquivo "${file.name}". Certifique-se de que é um extrato OFX ou CSV válido.`
+          erroLeitura.value = `Não conseguimos reconhecer lançamentos no arquivo "${file.name}". Certifique-se de que é um extrato OFX, CSV ou PDF de fatura válido.`
         }
       }
       readerIso.readAsText(file, 'ISO-8859-1')
@@ -490,31 +528,66 @@ const fechar = () => {
 }
 
 const confirmarImportacao = async () => {
-  if (modoDestino.value === 'cartao' && (!cartaoAlvoId.value || cartoes.value.length === 0)) {
+  erroLeitura.value = ''
+
+  // Fallback inteligente: se estiver em modo cartão e cartaoAlvoId estiver vazio mas houver cartões disponíveis
+  let targetCartaoId = cartaoAlvoId.value
+  if (modoDestino.value === 'cartao') {
+    if (!targetCartaoId && cartoes.value.length > 0) {
+      targetCartaoId = cartoes.value[0]?.id || cartoes.value[0]?.nome || ''
+      cartaoAlvoId.value = targetCartaoId
+    }
+    const cardObj = cartoes.value.find(c => 
+      (c.id && String(c.id) === String(targetCartaoId)) ||
+      (c.nome && c.nome.toLowerCase() === String(targetCartaoId).toLowerCase()) ||
+      (c.nome && c.nome.toLowerCase().includes(String(targetCartaoId).toLowerCase())) ||
+      (String(targetCartaoId).toLowerCase().includes(c.nome.toLowerCase()))
+    )
+    if (cardObj?.id && !String(cardObj.id).startsWith('card-')) {
+      targetCartaoId = String(cardObj.id)
+    } else if (cardObj?.nome) {
+      targetCartaoId = cardObj.nome
+    }
+  }
+
+  if (modoDestino.value === 'cartao' && (!targetCartaoId || cartoes.value.length === 0)) {
     erroLeitura.value = 'Selecione um cartão de crédito válido para importar a fatura.'
     return
   }
 
   salvando.value = true
-  const aprovados = transacoes.value
-    .filter(t => t.selecionado)
-    .map(t => ({
-      id: Date.now() + Math.random(),
-      tipo: t.tipo,
-      descricao: t.cleanName || t.descricao,
-      valor: t.valor,
-      categoria: t.categoria,
-      conta: modoDestino.value === 'conta' ? contaAlvo.value : '',
-      cartao_id: modoDestino.value === 'cartao' ? cartaoAlvoId.value : null,
-      parcela_atual: t.parcela ? t.parcela.atual : 1,
-      total_parcelas: t.parcela ? t.parcela.total : 1,
-      data: t.data,
-      dividir5050: t.dividir5050 || false
-    }))
+  try {
+    const aprovados = transacoes.value
+      .filter(t => t.selecionado)
+      .map(t => ({
+        id: Date.now() + Math.random(),
+        tipo: t.tipo,
+        descricao: t.cleanName || t.descricao,
+        valor: t.valor,
+        categoria: t.categoria,
+        conta: modoDestino.value === 'conta' ? contaAlvo.value : '',
+        cartao_id: modoDestino.value === 'cartao' ? targetCartaoId : null,
+        parcela_atual: t.parcela ? t.parcela.atual : 1,
+        total_parcelas: t.parcela ? t.parcela.total : 1,
+        data: t.data,
+        dividir5050: t.dividir5050 || false
+      }))
 
-  await emit('importar', aprovados)
-  salvando.value = false
-  fechar()
+    const res = await adicionarLancamentosEmLote(aprovados)
+    if (res && res.sucesso === false) {
+      erroLeitura.value = res.mensagem || 'Erro ao importar no banco de dados.'
+      salvando.value = false
+      return
+    }
+
+    emit('importar', aprovados)
+    salvando.value = false
+    fechar()
+  } catch (err) {
+    console.error('Erro na importação:', err)
+    erroLeitura.value = err?.message || 'Erro inesperado ao importar lançamentos.'
+    salvando.value = false
+  }
 }
 
 const formatData = (str) => {

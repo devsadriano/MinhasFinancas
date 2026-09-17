@@ -1,4 +1,5 @@
 import { ref } from 'vue'
+import { sanitizeText } from '~/utils/statementParser'
 
 // =============================================
 // INTERFACES
@@ -168,6 +169,21 @@ export function useFinancas() {
           if (novosCartoes) cartoes.value = novosCartoes.map((c: any) => ({ ...c, limite: Number(c.limite) }))
         }
 
+        // Auto-patch das configurações reais do cartão Nubank se ainda estiver com os valores iniciais
+        const nubankCard = cartoes.value.find(c => c.nome.toLowerCase().includes('nubank'))
+        if (nubankCard && (nubankCard.dia_fechamento === 1 || nubankCard.limite < 9000)) {
+          nubankCard.dia_fechamento = 16
+          nubankCard.dia_vencimento = 23
+          nubankCard.limite = 9650.00
+          if (nubankCard.id && !String(nubankCard.id).startsWith('card-')) {
+            await db.from('cartoes').update({
+              dia_fechamento: 16,
+              dia_vencimento: 23,
+              limite: 9650.00
+            }).eq('id', nubankCard.id)
+          }
+        }
+
         // 3. Categorias
         const { data: catData } = await db.from('categorias').select('*').order('created_at', { ascending: true })
         if (catData && catData.length > 0) {
@@ -202,8 +218,23 @@ export function useFinancas() {
             total_parcelas: t.total_parcelas || 1,
             conta: t.contas?.nome || '',
             categoria: t.categorias?.nome || 'Outros',
-            cartao_nome: t.cartoes?.nome
+            cartao_nome: t.cartoes?.nome || ''
           }))
+
+          // Auto-vincular transações legadas órfãs (sem cartao_id e sem conta_id) ao cartão Nubank
+          if (nubankCard?.id && !String(nubankCard.id).startsWith('card-')) {
+            const transOrfas = (transData || []).filter((t: any) => !t.cartao_id && !t.conta_id)
+            if (transOrfas.length > 0) {
+              const orfasIds = transOrfas.map((t: any) => t.id)
+              await db.from('transacoes').update({ cartao_id: nubankCard.id }).in('id', orfasIds)
+              transacoes.value.forEach(t => {
+                if (orfasIds.includes(t.id)) {
+                  t.cartao_id = nubankCard.id
+                  t.cartao_nome = nubankCard.nome
+                }
+              })
+            }
+          }
         }
 
         // 5. Orçamentos (mês atual)
@@ -269,23 +300,28 @@ export function useFinancas() {
 
     if (user.value) {
       try {
-        const novoDado = {
+        // Monta payload sem colunas FK nulas (evita erro de schema cache do PostgREST)
+        const novoDado: any = {
           user_id: user.value.id,
-          conta_id: item.usarCartao ? null : (contaEncontrada?.id || null),
-          cartao_id: item.usarCartao && item.cartao_id ? item.cartao_id : null,
-          categoria_id: catEncontrada?.id || null,
           descricao: item.descricao,
           valor: Number(item.valor),
           tipo: item.tipo,
           data: item.data,
           pago: true,
-          observacao: item.observacao || null,
           parcela_atual: item.parcela_atual || 1,
           total_parcelas: item.total_parcelas || 1
         }
+        if (item.usarCartao && item.cartao_id) novoDado.cartao_id = item.cartao_id
+        if (!item.usarCartao && contaEncontrada?.id) novoDado.conta_id = contaEncontrada.id
+        if (catEncontrada?.id) novoDado.categoria_id = catEncontrada.id
+        if (item.observacao) novoDado.observacao = item.observacao
 
-        const { data: inserido } = await db.from('transacoes').insert([novoDado]).select().single()
-        if (inserido) formatado.id = inserido.id
+        const { data: inserido, error: errIns } = await db.from('transacoes').insert([novoDado]).select().single()
+        if (errIns) {
+          console.error('Erro ao inserir lançamento:', errIns)
+        } else if (inserido) {
+          formatado.id = inserido.id
+        }
 
         // Persiste saldo da conta
         if (!item.usarCartao && contaEncontrada?.id) {
@@ -379,33 +415,66 @@ export function useFinancas() {
     }
   }
 
+  const isUUID = (str: any) => typeof str === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(str)
+
   const adicionarLancamentosEmLote = async (itens: any[]) => {
-    if (!itens || itens.length === 0) return
+    if (!itens || itens.length === 0) return { sucesso: true, quantidade: 0 }
+
+    const { data: sessionData } = await supabase.auth.getSession()
+    const currentUser = sessionData?.session?.user || user.value
+
+    const workspace = useWorkspace()
+    const activeGrupoId = workspace.grupoAtivo.value?.id
+    const validGrupoId = activeGrupoId && isUUID(activeGrupoId) ? activeGrupoId : null
 
     const formatados: Transacao[] = []
     const paraBanco: any[] = []
 
     for (const item of itens) {
-      const contaEncontrada = bancos.value.find(b =>
-        b.nome.toLowerCase().includes((item.conta || '').toLowerCase())
-      ) || bancos.value[0]
+      const temContaNome = item.conta && typeof item.conta === 'string' && item.conta.trim().length > 0
+      const contaEncontrada = temContaNome
+        ? (bancos.value.find(b =>
+            (b.id && b.id === item.conta_id) ||
+            (b.nome && b.nome.toLowerCase() === item.conta.trim().toLowerCase()) ||
+            (b.nome && b.nome.toLowerCase().includes(item.conta.trim().toLowerCase())) ||
+            (item.conta && item.conta.trim().toLowerCase().includes(b.nome.toLowerCase()))
+          ) || null)
+        : null
+
       const catEncontrada = categorias.value.find(c =>
-        c.nome.toLowerCase() === (item.categoria || '').toLowerCase()
+        (c.id && c.id === item.categoria_id) || (c.nome && c.nome.toLowerCase() === (item.categoria || '').toLowerCase())
       )
 
-      const cartaoIdValid = item.cartao_id && String(item.cartao_id).trim().length > 0 ? String(item.cartao_id) : null
-      const cartaoEncontrado = cartaoIdValid ? cartoes.value.find(c => c.id === cartaoIdValid) : null
+      const cartaoIdInput = item.cartao_id ? String(item.cartao_id).trim() : ''
+      let cartaoEncontrado = cartaoIdInput 
+        ? cartoes.value.find(c => 
+            (c.id && String(c.id).toLowerCase() === cartaoIdInput.toLowerCase()) || 
+            (c.nome && c.nome.toLowerCase() === cartaoIdInput.toLowerCase()) ||
+            (c.nome && c.nome.toLowerCase().includes(cartaoIdInput.toLowerCase())) ||
+            (cartaoIdInput.toLowerCase().includes(c.nome.toLowerCase()))
+          ) 
+        : null
+
+      if (cartaoIdInput && (!cartaoEncontrado || !isUUID(cartaoEncontrado.id))) {
+        cartaoEncontrado = await obterOuCriarCartao({ nome: cartaoIdInput })
+      }
+
+      // Resolver UUIDs válidos para as FKs do Supabase
+      const finalCartaoUuid = isUUID(cartaoIdInput) ? cartaoIdInput : (isUUID(cartaoEncontrado?.id) ? cartaoEncontrado!.id! : null)
+      const finalContaUuid = contaEncontrada && isUUID(contaEncontrada.id) ? contaEncontrada.id! : null
+      const finalCatUuid = catEncontrada && isUUID(catEncontrada.id) ? catEncontrada.id! : null
 
       const tempId = `tr-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`
+      const descSanitizada = sanitizeText(item.descricao) || 'Lançamento Importado'
       const formatado: Transacao = {
         id: tempId,
-        descricao: item.descricao,
+        descricao: descSanitizada,
         valor: Number(item.valor),
         tipo: item.tipo,
         data: item.data,
-        categoria: item.categoria || 'Outros',
-        conta: cartaoIdValid ? '' : (item.conta || ''),
-        cartao_id: cartaoIdValid,
+        categoria: sanitizeText(catEncontrada?.nome || item.categoria || 'Outros'),
+        conta: finalCartaoUuid ? '' : (contaEncontrada?.nome || item.conta || ''),
+        cartao_id: finalCartaoUuid || cartaoEncontrado?.id || cartaoIdInput || null,
         cartao_nome: cartaoEncontrado?.nome || item.cartao_nome || '',
         pago: true,
         parcela_atual: Number(item.parcela_atual || item.parcela?.atual || 1),
@@ -414,42 +483,84 @@ export function useFinancas() {
 
       formatados.push(formatado)
 
-      if (contaEncontrada && !cartaoIdValid) {
+      if (contaEncontrada && !finalCartaoUuid) {
         if (item.tipo === 'receita') contaEncontrada.saldo += Number(item.valor)
         else contaEncontrada.saldo -= Number(item.valor)
       }
 
-      if (user.value) {
-        paraBanco.push({
-          user_id: user.value.id,
-          conta_id: cartaoIdValid ? null : (contaEncontrada?.id || null),
-          cartao_id: cartaoIdValid,
-          categoria_id: catEncontrada?.id || null,
-          descricao: item.descricao,
+      if (currentUser) {
+        // Monta payload sem colunas FK nulas (evita erro de schema cache do PostgREST)
+        const rowBanco: any = {
+          user_id: currentUser.id,
+          descricao: descSanitizada,
           valor: Number(item.valor),
           tipo: item.tipo,
           data: item.data,
           pago: true,
           parcela_atual: Number(item.parcela_atual || item.parcela?.atual || 1),
           total_parcelas: Number(item.total_parcelas || item.parcela?.total || 1)
-        })
+        }
+        if (validGrupoId) rowBanco.grupo_id = validGrupoId
+        if (finalCartaoUuid) rowBanco.cartao_id = finalCartaoUuid
+        if (!finalCartaoUuid && finalContaUuid) rowBanco.conta_id = finalContaUuid
+        if (finalCatUuid) rowBanco.categoria_id = finalCatUuid
+        paraBanco.push(rowBanco)
       }
     }
 
-    transacoes.value = [...formatados, ...transacoes.value]
-
-    const workspace = useWorkspace()
-
-    if (user.value && paraBanco.length > 0) {
+    if (currentUser && paraBanco.length > 0) {
       try {
-        const { data: inseridos, error } = await db
+        let inseridos: any[] | null = null
+        let insertError: any = null
+
+        // Tentativa principal com todos os campos
+        const result1 = await db
           .from('transacoes')
           .insert(paraBanco)
-          .select('*, contas(nome), categorias(nome)')
+          .select('id, valor')
 
-        if (error) {
-          console.error('Erro ao salvar lote no Supabase:', error)
-        } else if (inseridos) {
+        if (result1.error) {
+          insertError = result1.error
+          console.error('Erro ao salvar lote no Supabase (tentativa 1):', result1.error)
+
+          // Fallback: se for erro de schema cache, tenta apenas com colunas básicas
+          if (
+            result1.error.message?.includes('schema cache') ||
+            result1.error.message?.includes('column') ||
+            result1.error.code === 'PGRST204'
+          ) {
+            const paraBancoBasico = paraBanco.map((row: any) => ({
+              user_id: row.user_id,
+              descricao: row.descricao,
+              valor: row.valor,
+              tipo: row.tipo,
+              data: row.data,
+              pago: row.pago ?? true,
+              parcela_atual: row.parcela_atual ?? 1,
+              total_parcelas: row.total_parcelas ?? 1,
+              ...(row.cartao_id ? { cartao_id: row.cartao_id } : {}),
+              ...(row.conta_id ? { conta_id: row.conta_id } : {}),
+              ...(row.categoria_id ? { categoria_id: row.categoria_id } : {})
+            }))
+            const result2 = await db
+              .from('transacoes')
+              .insert(paraBancoBasico)
+              .select('id, valor')
+
+            if (result2.error) {
+              console.error('Erro no fallback básico:', result2.error)
+              return { sucesso: false, mensagem: `Erro ao salvar no banco: ${result2.error.message}` }
+            }
+            inseridos = result2.data
+            insertError = null
+          } else {
+            return { sucesso: false, mensagem: `Erro ao salvar no banco: ${result1.error.message}` }
+          }
+        } else {
+          inseridos = result1.data
+        }
+
+        if (inseridos) {
           for (let idx = 0; idx < inseridos.length; idx++) {
             const ins = inseridos[idx]
             const orig = itens[idx]
@@ -461,8 +572,9 @@ export function useFinancas() {
             }
           }
         }
-      } catch (e) {
+      } catch (e: any) {
         console.error('Erro na requisição em lote Supabase:', e)
+        return { sucesso: false, mensagem: e?.message || 'Erro ao conectar ao banco.' }
       }
     } else {
       for (let idx = 0; idx < formatados.length; idx++) {
@@ -472,6 +584,9 @@ export function useFinancas() {
         }
       }
     }
+
+    await carregarTudo(true)
+    return { sucesso: true, quantidade: formatados.length }
   }
 
   // ──────────────────────────────────────────

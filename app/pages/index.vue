@@ -384,8 +384,7 @@ const {
   categorias,
   carregando,
   carregarTudo,
-  adicionarLancamento,
-  adicionarLancamentosEmLote
+  adicionarLancamento
 } = useFinancas()
 
 onMounted(() => carregarTudo())
@@ -446,7 +445,21 @@ const cartoesComFatura = computed(() =>
 )
 
 const handleSalvar = async (item) => await adicionarLancamento(item)
-const handleImportarEmLote = async (itens) => await adicionarLancamentosEmLote(itens)
+// O modal já salva os lançamentos internamente.
+// Aqui só recarregamos os dados para atualizar a UI.
+const handleImportarEmLote = async (itens) => {
+  await carregarTudo(true)
+  if (itens && itens.length > 0) {
+    const primeiraData = itens[0]?.data
+    if (primeiraData) {
+      const parts = primeiraData.split('-').map(Number)
+      if (parts[0] && parts[1]) {
+        anoSelecionado.value = parts[0]
+        mesSelecionado.value = parts[1]
+      }
+    }
+  }
+}
 
 const formatData = (str) => {
   if (!str) return ''

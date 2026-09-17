@@ -25,6 +25,7 @@ export interface MembroGrupo {
   created_at?: string
   // Joins
   perfil?: Perfil
+  perfis?: Perfil
 }
 
 export interface Conta {

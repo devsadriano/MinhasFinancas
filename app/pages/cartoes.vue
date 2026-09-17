@@ -18,8 +18,9 @@
           <!-- Filtro de mês da fatura -->
           <select
             v-model="mesFatura"
-            class="bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-400"
+            class="bg-dark-800 border border-dark-700 rounded-lg px-3 py-2 text-xs text-white focus:outline-none focus:border-purple-400 font-semibold"
           >
+            <option :value="0">Todas as Faturas (Ver Tudo)</option>
             <option v-for="(nome, idx) in nomesMeses" :key="idx" :value="idx + 1">Fatura {{ nome }}</option>
           </select>
           <select
@@ -395,7 +396,7 @@
 import { ref, reactive, computed, onMounted } from 'vue'
 import { useFinancas } from '~/composables/useFinancas'
 
-const { cartoes, transacoes, carregando, carregarTudo, adicionarCartao, editarCartao, excluirCartao, removerLancamento, adicionarLancamentosEmLote } = useFinancas()
+const { cartoes, transacoes, carregando, carregarTudo, adicionarCartao, editarCartao, excluirCartao, removerLancamento } = useFinancas()
 
 const modalAberto = ref(false)
 const modalExcluir = ref(false)
@@ -454,14 +455,59 @@ const parseMesAno = (str) => {
   return { mes: 0, ano: 0 }
 }
 
+const pertenceAoCartao = (t, c) => {
+  if (!t || !c) return false
+  const cId = c.id ? String(c.id).trim().toLowerCase() : ''
+  const cNome = c.nome ? String(c.nome).trim().toLowerCase() : ''
+
+  if (t.cartao_id) {
+    const tId = String(t.cartao_id).trim().toLowerCase()
+    if ((cId && tId === cId) || (cNome && tId === cNome) || (cNome && tId.includes(cNome)) || (cNome && cNome.includes(tId))) {
+      return true
+    }
+  }
+
+  if (t.cartao_nome) {
+    const tCardName = String(t.cartao_nome).trim().toLowerCase()
+    if ((cNome && tCardName === cNome) || (cNome && tCardName.includes(cNome)) || (cNome && cNome.includes(tCardName))) {
+      return true
+    }
+  }
+
+  // Fallback: transações de extrato sem conta bancária associada pertencem ao cartão
+  if (!t.conta_id && (!t.conta || t.conta === '')) {
+    return true
+  }
+
+  return false
+}
+
+const pertenceAFatura = (t, c, mesAlvo, anoAlvo) => {
+  if (!t || !c) return false
+  if (!pertenceAoCartao(t, c)) return false
+  if (!mesAlvo || mesAlvo === 0) return true
+
+  const diaFechamento = Number(c.dia_fechamento) || 15
+  if (!t.data) return false
+
+  const parts = t.data.split('-').map(Number)
+  if (parts.length < 3 || !parts[0] || !parts[1] || !parts[2]) return false
+
+  const y = parts[0]
+  const m = parts[1]
+  const d = parts[2]
+
+  const dataCompra = new Date(y, m - 1, d)
+  const dataFimCiclo = new Date(anoAlvo, mesAlvo - 1, diaFechamento, 23, 59, 59)
+  const dataInicioCiclo = new Date(anoAlvo, mesAlvo - 2, diaFechamento + 1, 0, 0, 0)
+
+  return dataCompra >= dataInicioCiclo && dataCompra <= dataFimCiclo
+}
+
 const cartoesComLimite = computed(() =>
   cartoes.value.map(c => {
     const gastosFatura = transacoes.value
-      .filter(t => {
-        if (t.cartao_id !== c.id) return false
-        const { mes, ano } = parseMesAno(t.data)
-        return mes === mesFatura.value && ano === anoFatura.value
-      })
+      .filter(t => pertenceAFatura(t, c, mesFatura.value, anoFatura.value))
       .reduce((acc, curr) => acc + curr.valor, 0)
 
     const limiteDisponivel = Math.max(c.limite - gastosFatura, 0)
@@ -471,16 +517,12 @@ const cartoesComLimite = computed(() =>
 )
 
 const cartaoAtivo = computed(() =>
-  cartoesComLimite.value.find(c => c.id === cartaoSelecionadoId.value) || cartoesComLimite.value[0]
+  cartoesComLimite.value.find(c => (c.id && c.id === cartaoSelecionadoId.value) || (c.nome && c.nome === cartaoSelecionadoId.value)) || cartoesComLimite.value[0]
 )
 
 const lancamentosDoCartao = computed(() => {
   if (!cartaoAtivo.value) return []
-  return transacoes.value.filter(t => {
-    if (t.cartao_id !== cartaoAtivo.value.id) return false
-    const { mes, ano } = parseMesAno(t.data)
-    return mes === mesFatura.value && ano === anoFatura.value
-  })
+  return transacoes.value.filter(t => pertenceAFatura(t, cartaoAtivo.value, mesFatura.value, anoFatura.value))
 })
 
 const totalFaturaAtiva = computed(() =>
@@ -539,7 +581,21 @@ const executarExcluir = async () => {
 }
 
 const abrirModalImportar = () => { modalImportarAberto.value = true }
-const handleImportarEmLote = async (itens) => await adicionarLancamentosEmLote(itens)
+// O modal já salva os lançamentos internamente.
+// Aqui só recarregamos os dados para atualizar a UI.
+const handleImportarEmLote = async (itens) => {
+  await carregarTudo(true)
+  if (itens && itens.length > 0) {
+    const primeiraData = itens[0]?.data
+    if (primeiraData) {
+      const parts = primeiraData.split('-').map(Number)
+      if (parts[0] && parts[1]) {
+        anoFatura.value = parts[0]
+        mesFatura.value = parts[1]
+      }
+    }
+  }
+}
 
 const formatData = (str) => {
   if (!str) return ''

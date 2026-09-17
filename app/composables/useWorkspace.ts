@@ -16,6 +16,7 @@ const gruposDisponiveis = ref<GrupoFamiliar[]>([])
 const membrosGrupo = ref<MembroGrupo[]>([])
 const modoVisao = ref<'casal' | 'pessoal'>('casal')
 const carregandoWorkspace = ref(false)
+let carregandoLock = false // Mutex para evitar chamadas simultâneas
 
 export function useWorkspace() {
   const supabase = useSupabaseClient()
@@ -26,8 +27,14 @@ export function useWorkspace() {
   // CARREGAR GRUPOS E MEMBROS DO USUÁRIO
   // ──────────────────────────────────────────
   const carregarWorkspace = async () => {
-    if (!user.value) {
-      // Fallback convidado / local
+    if (carregandoLock) return // Bloqueia chamadas simultâneas
+
+    // Obter sessão atual do Supabase Client
+    const { data: sessionData } = await supabase.auth.getSession()
+    const currentUser = sessionData?.session?.user || user.value
+
+    // Sem usuário autenticado: dados de demonstração (SEM lock pois é síncrono)
+    if (!currentUser) {
       if (!grupoAtivo.value) {
         grupoAtivo.value = {
           id: 'grupo-demo-casal',
@@ -47,66 +54,156 @@ export function useWorkspace() {
             grupo_id: 'grupo-demo-casal',
             user_id: 'user-demo-2',
             papel: 'membro',
-            perfil: { id: 'user-demo-2', nome: 'Amor / Parco', email: 'parceiro@email.com', moeda: 'BRL' }
+            perfil: { id: 'user-demo-2', nome: 'Amor / Parceiro(a)', email: 'parceiro@email.com', moeda: 'BRL' }
           }
         ]
       }
-      return
+      return // Retorna SEM ativar o lock
     }
+
+    // Usuário autenticado: ativa o lock só agora
+    carregandoLock = true
 
     carregandoWorkspace.value = true
     try {
       // 1. Buscar membros do usuário logado para encontrar os grupos que ele pertence
-      const { data: membrosData } = await db
+      let membrosData: any[] | null = null
+      
+      // Tentar busca completa com JOIN
+      const { data: dJoin, error: errJoin } = await db
         .from('membros_grupo')
         .select('*, grupos_familiares(*), perfis(*)')
-        .eq('user_id', user.value.id)
+        .eq('user_id', currentUser.id)
+
+      if (!errJoin && dJoin) {
+        membrosData = dJoin
+      } else {
+        // Fallback: Busca sem JOIN se a relação/FK ainda não foi criada no BD
+        const { data: dSimples } = await db
+          .from('membros_grupo')
+          .select('*, grupos_familiares(*)')
+          .eq('user_id', currentUser.id)
+        membrosData = dSimples
+      }
 
       if (membrosData && membrosData.length > 0) {
         gruposDisponiveis.value = membrosData
           .map((m: any) => m.grupos_familiares as GrupoFamiliar)
           .filter(Boolean)
 
-        if (!grupoAtivo.value && gruposDisponiveis.value.length > 0) {
-          grupoAtivo.value = gruposDisponiveis.value[0] || null
+        if (gruposDisponiveis.value.length > 0) {
+          const pertence = gruposDisponiveis.value.find(g => g.id === grupoAtivo.value?.id)
+          if (!pertence || grupoAtivo.value?.id.startsWith('grupo-demo-') || grupoAtivo.value?.id.startsWith('grupo-temp-')) {
+            grupoAtivo.value = gruposDisponiveis.value[0] || null
+          }
         }
       } else {
-        // Se o usuário não tem grupo, cria o grupo padrão "Casa Rocha"
-        const novoGrupo = {
-          nome: 'Casa (Workspace)',
-          user_criador_id: user.value.id
-        }
-        const { data: gCriado } = await db.from('grupos_familiares').insert([novoGrupo]).select().single()
-        if (gCriado) {
-          grupoAtivo.value = gCriado
-          gruposDisponiveis.value = [gCriado]
+        // Tentar buscar se o usuário já criou algum grupo como criador (sem ser via membros_grupo)
+        const { data: gruposCriados } = await db
+          .from('grupos_familiares')
+          .select('*')
+          .eq('user_criador_id', currentUser.id)
 
-          // Inserir usuário como admin do grupo
-          await db.from('membros_grupo').insert([{
-            grupo_id: gCriado.id,
-            user_id: user.value.id,
+        if (gruposCriados && gruposCriados.length > 0) {
+          grupoAtivo.value = gruposCriados[0]
+          gruposDisponiveis.value = gruposCriados
+          
+          // Garantir que o criador está na tabela membros_grupo
+          await db.from('membros_grupo').upsert([{
+            grupo_id: gruposCriados[0].id,
+            user_id: currentUser.id,
             papel: 'admin'
-          }])
+          }], { onConflict: 'grupo_id,user_id' })
+        } else {
+          // Usuário não tem grupo ainda — cria objeto local temporário.
+          // O grupo real é criado no banco APENAS quando o usuário clicar em "Salvar Nome"
+          const nomePadrao = currentUser.user_metadata?.nome 
+            ? `Workspace de ${currentUser.user_metadata.nome}`
+            : 'Meu Workspace'
+
+          grupoAtivo.value = {
+            id: `grupo-temp-${currentUser.id}`,
+            nome: nomePadrao,
+            user_criador_id: currentUser.id
+          }
+          gruposDisponiveis.value = [grupoAtivo.value]
         }
       }
 
       // 2. Buscar todos os membros do grupo ativo
-      if (grupoAtivo.value) {
-        const { data: todosMembros } = await db
+      if (grupoAtivo.value && !grupoAtivo.value.id.startsWith('grupo-demo-')) {
+        // Tentar select com join
+        const { data: todosMembros, error: errTodos } = await db
           .from('membros_grupo')
           .select('*, perfis(*)')
           .eq('grupo_id', grupoAtivo.value.id)
 
-        if (todosMembros) {
-          membrosGrupo.value = todosMembros as MembroGrupo[]
+        if (!errTodos && todosMembros && todosMembros.length > 0) {
+          // Buscar manualmente perfis para quaisquer membros que vieram com perfis null
+          const semPerfilIds = todosMembros
+            .filter((m: any) => !m.perfil && !m.perfis)
+            .map((m: any) => m.user_id)
+
+          let perfisExtraMap = new Map()
+          if (semPerfilIds.length > 0) {
+            const { data: pExtra } = await db.from('perfis').select('*').in('id', semPerfilIds)
+            if (pExtra) {
+              perfisExtraMap = new Map(pExtra.map((p: any) => [p.id, p]))
+            }
+          }
+
+          membrosGrupo.value = todosMembros.map((m: any) => {
+            const perfilEncontrado = m.perfil || m.perfis || perfisExtraMap.get(m.user_id)
+            return {
+              ...m,
+              perfil: perfilEncontrado || {
+                id: m.user_id,
+                nome: m.user_id === currentUser.id 
+                  ? (currentUser.user_metadata?.nome || currentUser.email?.split('@')[0] || 'Você')
+                  : 'Membro do Casal',
+                email: m.user_id === currentUser.id ? (currentUser.email || '') : '',
+                moeda: 'BRL'
+              }
+            }
+          }) as MembroGrupo[]
+        } else {
+          // Fallback manual se a relação FK falhou
+          const { data: membrosSemPerfil } = await db
+            .from('membros_grupo')
+            .select('*')
+            .eq('grupo_id', grupoAtivo.value.id)
+
+          if (membrosSemPerfil && membrosSemPerfil.length > 0) {
+            const userIds = membrosSemPerfil.map((m: any) => m.user_id)
+            const { data: perfisData } = await db.from('perfis').select('*').in('id', userIds)
+            
+            const perfisMap = new Map((perfisData || []).map((p: any) => [p.id, p]))
+
+            membrosGrupo.value = membrosSemPerfil.map((m: any) => ({
+              ...m,
+              perfil: perfisMap.get(m.user_id) || {
+                id: m.user_id,
+                nome: m.user_id === user.value?.id 
+                  ? (user.value?.user_metadata?.nome || user.value?.email?.split('@')[0] || 'Você')
+                  : 'Membro do Casal',
+                email: m.user_id === user.value?.id ? (user.value?.email || '') : '',
+                moeda: 'BRL'
+              }
+            })) as MembroGrupo[]
+          } else {
+            membrosGrupo.value = []
+          }
         }
       }
     } catch (err) {
       console.error('Erro ao carregar workspace:', err)
     } finally {
       carregandoWorkspace.value = false
+      carregandoLock = false // Libera o lock
     }
   }
+
+  // (Watch removido — carregarWorkspace é chamado explicitamente pelo onMounted das páginas)
 
   // ──────────────────────────────────────────
   // TROCAR GRUPO / VISÃO
@@ -321,17 +418,149 @@ export function useWorkspace() {
   // ──────────────────────────────────────────
   // ATUALIZAR NOME DO WORKSPACE
   // ──────────────────────────────────────────
-  const atualizarNomeGrupo = async (novoNome: string) => {
-    if (!grupoAtivo.value || !novoNome.trim()) return
-    grupoAtivo.value.nome = novoNome.trim()
+  const atualizarNomeGrupo = async (novoNome: string): Promise<{ sucesso: boolean; mensagem: string }> => {
+    const nomeLimpo = novoNome ? novoNome.trim() : ''
+    if (!nomeLimpo) {
+      return { sucesso: false, mensagem: 'Informe um nome válido para o workspace.' }
+    }
 
-    if (user.value && grupoAtivo.value.id && !grupoAtivo.value.id.startsWith('grupo-demo-')) {
+    // Obter a sessão ativa diretamente do Supabase Client
+    const { data: sessionData } = await supabase.auth.getSession()
+    const currentUser = sessionData?.session?.user || user.value
+
+    if (!grupoAtivo.value) {
+      if (currentUser) {
+        grupoAtivo.value = {
+          id: `grupo-temp-${currentUser.id}`,
+          nome: nomeLimpo,
+          user_criador_id: currentUser.id
+        }
+      } else {
+        grupoAtivo.value = {
+          id: 'grupo-demo-casal',
+          nome: nomeLimpo,
+          user_criador_id: 'user-demo-1'
+        }
+      }
+    } else {
+      grupoAtivo.value.nome = nomeLimpo
+    }
+
+    if (currentUser) {
       try {
-        await db.from('grupos_familiares').update({ nome: novoNome.trim() }).eq('id', grupoAtivo.value.id)
-      } catch (e) {
+        // Se for um grupo temporário ou demo, cria no banco de dados primeiro
+        if (grupoAtivo.value.id.startsWith('grupo-temp-') || grupoAtivo.value.id.startsWith('grupo-demo-')) {
+          const { data: novoG, error: errIns } = await db
+            .from('grupos_familiares')
+            .insert([{ nome: nomeLimpo, user_criador_id: currentUser.id }])
+            .select()
+            .single()
+
+          if (errIns) {
+            console.error('Erro ao criar grupo no Supabase:', errIns)
+            if (errIns.message?.includes('row-level security')) {
+              return { 
+                sucesso: false, 
+                mensagem: 'Erro de permissão no Supabase (RLS). Por favor, execute o script SQL "fix_rls_final.sql" no SQL Editor do Supabase para corrigir as permissões.' 
+              }
+            }
+            return { sucesso: false, mensagem: `Erro ao criar no banco: ${errIns.message}` }
+          }
+
+          if (novoG) {
+            grupoAtivo.value = novoG
+            gruposDisponiveis.value = [novoG]
+
+            await db.from('membros_grupo').insert([{
+              grupo_id: novoG.id,
+              user_id: currentUser.id,
+              papel: 'admin'
+            }])
+
+            await carregarWorkspace()
+            return { sucesso: true, mensagem: 'Workspace criado e nome salvo com sucesso!' }
+          }
+        } else {
+          // Atualiza grupo existente no banco
+          const { error } = await db
+            .from('grupos_familiares')
+            .update({ nome: nomeLimpo })
+            .eq('id', grupoAtivo.value.id)
+
+          if (error) {
+            console.error('Erro ao atualizar nome do grupo no Supabase:', error)
+            return { sucesso: false, mensagem: `Erro ao salvar no banco: ${error.message}` }
+          }
+          
+          return { sucesso: true, mensagem: 'Nome do Workspace atualizado com sucesso!' }
+        }
+      } catch (e: any) {
         console.error('Erro ao atualizar nome do grupo:', e)
+        return { sucesso: false, mensagem: e?.message || 'Erro de conexão ao salvar nome.' }
       }
     }
+
+    return { sucesso: true, mensagem: 'Nome do Workspace atualizado (modo local)!' }
+  }
+
+  // ──────────────────────────────────────────
+  // CRIAR UM NOVO WORKSPACE DEDICADO
+  // ──────────────────────────────────────────
+  const criarNovoGrupo = async (nome: string): Promise<{ sucesso: boolean; mensagem: string }> => {
+    const nomeLimpo = nome ? nome.trim() : ''
+    if (!nomeLimpo) {
+      return { sucesso: false, mensagem: 'Informe um nome válido para o novo workspace.' }
+    }
+
+    const { data: sessionData } = await supabase.auth.getSession()
+    const currentUser = sessionData?.session?.user || user.value
+
+    if (!currentUser) {
+      const novoDemo: GrupoFamiliar = {
+        id: `grupo-demo-${Date.now()}`,
+        nome: nomeLimpo,
+        user_criador_id: 'user-demo-1'
+      }
+      gruposDisponiveis.value.push(novoDemo)
+      grupoAtivo.value = novoDemo
+      return { sucesso: true, mensagem: `Workspace "${nomeLimpo}" criado (modo local)!` }
+    }
+
+    try {
+      const { data: novoG, error: errIns } = await db
+        .from('grupos_familiares')
+        .insert([{ nome: nomeLimpo, user_criador_id: currentUser.id }])
+        .select()
+        .single()
+
+      if (errIns) {
+        console.error('Erro ao criar grupo no Supabase:', errIns)
+        if (errIns.message?.includes('row-level security')) {
+          return { 
+            sucesso: false, 
+            mensagem: 'Erro de permissão no Supabase (RLS). Execute o script "fix_rls_final.sql" no SQL Editor.' 
+          }
+        }
+        return { sucesso: false, mensagem: `Erro ao criar no banco: ${errIns.message}` }
+      }
+
+      if (novoG) {
+        await db.from('membros_grupo').insert([{
+          grupo_id: novoG.id,
+          user_id: currentUser.id,
+          papel: 'admin'
+        }])
+
+        await carregarWorkspace()
+        grupoAtivo.value = novoG
+        return { sucesso: true, mensagem: `Workspace "${nomeLimpo}" criado com sucesso!` }
+      }
+    } catch (e: any) {
+      console.error('Erro ao criar novo workspace:', e)
+      return { sucesso: false, mensagem: e?.message || 'Erro de conexão ao criar workspace.' }
+    }
+
+    return { sucesso: false, mensagem: 'Não foi possível criar o workspace.' }
   }
 
   return {
@@ -348,6 +577,7 @@ export function useWorkspace() {
     calcularAcertoDeContas,
     liquidarAcertoDeContas,
     adicionarParceiro,
-    atualizarNomeGrupo
+    atualizarNomeGrupo,
+    criarNovoGrupo
   }
 }

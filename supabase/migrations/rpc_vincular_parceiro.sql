@@ -25,6 +25,20 @@ BEGIN
     FROM public.perfis 
     WHERE LOWER(email) = email_convidado;
 
+    -- Se não achou na tabela perfis, busca em auth.users e cria o perfil automaticamente
+    IF v_user_id IS NULL THEN
+        SELECT id, COALESCE(raw_user_meta_data->>'nome', split_part(email, '@', 1)) 
+        INTO v_user_id, v_nome_convidado
+        FROM auth.users 
+        WHERE LOWER(email) = email_convidado;
+
+        IF v_user_id IS NOT NULL THEN
+            INSERT INTO public.perfis (id, nome, email)
+            VALUES (v_user_id, v_nome_convidado, email_convidado)
+            ON CONFLICT (id) DO NOTHING;
+        END IF;
+    END IF;
+
     -- 3. Se a conta não existir no app, dispara mensagem clara
     IF v_user_id IS NULL THEN
         RAISE EXCEPTION 'Conta não encontrada com o e-mail "%". Peça para seu parceiro(a) se cadastrar no app primeiro.', email_convidado;

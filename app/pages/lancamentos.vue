@@ -116,6 +116,21 @@
             <span class="text-xs text-gray-400 font-mono">
               {{ lancamentosFiltrados.length }} lançamentos encontrados
             </span>
+            <button
+              v-if="lancamentosFiltrados.length > 0"
+              @click="apagarTodosFiltrados"
+              :disabled="apagandoTodos"
+              class="text-xs font-semibold text-expense hover:text-white bg-expense/10 hover:bg-expense/30 border border-expense/30 px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5 disabled:opacity-50"
+            >
+              <svg v-if="apagandoTodos" class="animate-spin h-3.5 w-3.5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+                <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 12h4z"></path>
+              </svg>
+              <svg v-else xmlns="http://www.w3.org/2000/svg" class="h-3.5 w-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+              </svg>
+              {{ apagandoTodos ? 'Apagando...' : `Apagar todos (${lancamentosFiltrados.length})` }}
+            </button>
           </div>
 
           <!-- Mobile cards -->
@@ -284,6 +299,7 @@ import { useFinancas } from '~/composables/useFinancas'
 const modalAberto = ref(false)
 const modalImportarAberto = ref(false)
 const lancamentoEditando = ref(null)
+const apagandoTodos = ref(false)
 
 const busca = ref('')
 const filtroTipo = ref('todos')
@@ -304,7 +320,6 @@ const {
   carregarTudo,
   adicionarLancamento,
   editarLancamento,
-  adicionarLancamentosEmLote,
   removerLancamento
 } = useFinancas()
 
@@ -355,8 +370,36 @@ const handleSalvar = async (item) => {
   }
 }
 
-const handleImportarEmLote = async (itens) => await adicionarLancamentosEmLote(itens)
+// O modal já salva os lançamentos internamente.
+// Aqui só recarregamos os dados para atualizar a UI.
+const handleImportarEmLote = async (itens) => {
+  await carregarTudo(true)
+  if (itens && itens.length > 0) {
+    const primeiraData = itens[0]?.data
+    if (primeiraData) {
+      const parts = primeiraData.split('-').map(Number)
+      if (parts[0] && parts[1]) {
+        anoFiltro.value = parts[0]
+        mesFiltro.value = parts[1]
+      }
+    }
+  }
+}
 const handleRemover = async (id) => await removerLancamento(id)
+
+const apagarTodosFiltrados = async () => {
+  const total = lancamentosFiltrados.value.length
+  if (total === 0) return
+  const confirmado = confirm(`⚠️ Tem certeza que deseja apagar TODOS os ${total} lançamentos do período filtrado? Esta ação não pode ser desfeita.`)
+  if (!confirmado) return
+  apagandoTodos.value = true
+  const ids = lancamentosFiltrados.value.map(t => t.id).filter(Boolean)
+  for (const id of ids) {
+    await removerLancamento(id)
+  }
+  apagandoTodos.value = false
+  await carregarTudo(true)
+}
 
 const limparFiltros = () => {
   busca.value = ''
